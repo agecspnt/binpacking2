@@ -15,7 +15,6 @@ import os
 from PIL import Image
 import shutil
 
-
 def save_population_agreement_matrix(population, num_items, filename='population_agreement_matrix.txt'):
     agreement_matrix = np.zeros((num_items, num_items))
 
@@ -46,13 +45,12 @@ def save_population_agreement_matrix(population, num_items, filename='population
 
     return agreement_matrix
 
-
 class GA:
     def __init__(self, num_items, num_total, max_iterations, items, mutation_rate=0.05, crossover_rate=0.85,
                  population_size=25, early_stop_generations=200, improvement_threshold=0.01, bin_width=10,
-                 bin_height=10,
-                 update_callback=None, selection_method='roulette', mutation_type='reverse', crossover_type='order',
-                 save_outputs=False):
+                 bin_height=10, update_callback=None, selection_method='roulette', mutation_type='reverse',
+                 crossover_type='order', save_outputs=False, run_number=1, output_folder='experiment_results'):
+        # 添加run_number和output_folder参数
         self.num_items = num_items
         self.num_total = num_total
         self.max_iterations = max_iterations
@@ -76,12 +74,16 @@ class GA:
         self.crossover_type = crossover_type
         self.generation = 0
         self.save_outputs = save_outputs
+        self.run_number = run_number
+        self.output_folder = output_folder
 
-        # Create images directory only if save_outputs is True
+        # Create run-specific directory for images
         if self.save_outputs:
-            if os.path.exists('generation_images'):
-                shutil.rmtree('generation_images')
-            os.makedirs('generation_images')
+            self.run_output_dir = os.path.join(output_folder, f'run_{run_number}')
+            self.images_dir = os.path.join(self.run_output_dir, 'generation_images')
+            if os.path.exists(self.images_dir):
+                shutil.rmtree(self.images_dir)
+            os.makedirs(self.images_dir, exist_ok=True)
 
     def save_generation_image(self, bins, improvement_curve):
         if not self.save_outputs:
@@ -91,13 +93,15 @@ class GA:
         ax2 = fig.add_axes([0.1, 0.35, 0.8, 0.6])
         ax1 = fig.add_axes([0.1, 0.05, 0.8, 0.25])
 
+        # Plot improvement curve
         ax1.plot(improvement_curve)
         ax1.set_title('Fitness Improvement')
         ax1.set_xlabel('Generation')
         ax1.set_ylabel('Fitness')
         ax1.grid(True)
 
-        colors = plt.cm.get_cmap('hsv')(np.linspace(0, 1, 30))
+        # Plot bin packing solution
+        colors = plt.cm.get_cmap('hsv')(np.linspace(0, 1, 300))
         bins_per_row = 4
         spacing = 2
         grid_width = bins_per_row * (self.bin_width + spacing)
@@ -111,7 +115,7 @@ class GA:
             y_pos = (num_rows - 1 - row) * (self.bin_height + spacing)
 
             bin_rect = plt.Rectangle((x_pos, y_pos), self.bin_width, self.bin_height,
-                                     facecolor='none', edgecolor='black', linestyle='--')
+                                   facecolor='none', edgecolor='black', linestyle='--')
             ax2.add_patch(bin_rect)
 
             for item in bin_dict['items']:
@@ -122,35 +126,36 @@ class GA:
                 color = colors[item['id'] - 1]
 
                 rect = plt.Rectangle((item_x, item_y), item_w, item_h,
-                                     facecolor=color, edgecolor='black', alpha=0.7)
+                                   facecolor=color, edgecolor='black', alpha=0.7)
                 ax2.add_patch(rect)
                 ax2.text(item_x + item_w / 2, item_y + item_h / 2, f'{item["id"]}',
                          ha='center', va='center')
 
         ax2.set_xlim(-spacing, grid_width + spacing)
-        ax2.set_ylim(-spacing, num_rows * (bin_height + spacing) + spacing)
+        ax2.set_ylim(-spacing, num_rows * (self.bin_height + spacing) + spacing)
         ax2.set_title(f'Current Best Solution (Generation {self.generation})')
         ax2.set_aspect('equal')
         ax2.grid(True)
 
-        plt.savefig(f'generation_images/generation_{self.generation:04d}.png')
+        plt.savefig(os.path.join(self.images_dir, f'generation_{self.generation:04d}.png'))
         plt.close(fig)
 
     def create_gif(self):
-        if not self.save_outputs or not os.path.exists('generation_images'):
+        if not self.save_outputs or not os.path.exists(self.images_dir):
             return
 
         images = []
-        image_files = sorted(os.listdir('generation_images'))
+        image_files = sorted(os.listdir(self.images_dir))
 
         for filename in image_files:
             if filename.endswith('.png'):
-                file_path = os.path.join('generation_images', filename)
+                file_path = os.path.join(self.images_dir, filename)
                 images.append(Image.open(file_path))
 
         if images:
+            gif_path = os.path.join(self.run_output_dir, f'evolution_run_{self.run_number}.gif')
             images[0].save(
-                'evolution.gif',
+                gif_path,
                 save_all=True,
                 append_images=images[1:],
                 duration=200,
@@ -386,7 +391,116 @@ class GA:
                 break
 
         self.create_gif()
+
+        # 在运行结束时保存最终种群信息
+        self.save_final_population(self.run_number)
+
         return self.pack_items(self.best_solution), self.best_fitness, self.improvement_curve
+
+    def save_final_population(self, run_number):
+        """保存最终种群的信息到CSV文件"""
+        if not self.save_outputs:
+            return
+            
+        # 计算所有个体的适应度
+        population_fitness = [(individual, self.compute_fitness(individual)) 
+                            for individual in self.fruits]
+        
+        # 按适应度排序
+        population_fitness.sort(key=lambda x: x[1])
+        
+        # 准备CSV文件路径
+        population_file = os.path.join(self.run_output_dir, 'final_population.csv')
+        
+        # 写入CSV文件
+        with open(population_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            # 写入表头
+            writer.writerow(['Individual_ID', 'Fitness', 'Solution_Sequence'])
+            
+            # 写入每个个体的信息
+            for idx, (solution, fitness) in enumerate(population_fitness, 1):
+                writer.writerow([idx, fitness, ','.join(map(str, solution))])
+
+    def create_woc_solution(self, all_populations, num_items, top_ratio=0.2, pairs_threshold=0.3):
+        """基于多次运行的种群创建WOC解决方案"""
+        # 收集所有种群中最优的解
+        all_best_solutions = []
+        for population in all_populations:
+            solutions_with_fitness = [(sol, self.compute_fitness(sol)) for sol in population]
+            solutions_with_fitness.sort(key=lambda x: x[1])
+            num_to_select = int(len(population) * top_ratio)
+            all_best_solutions.extend([sol for sol, _ in solutions_with_fitness[:num_to_select]])
+
+        # 创建agreement矩阵
+        agreement_matrix = np.zeros((num_items, num_items))
+        for solution in all_best_solutions:
+            for i in range(len(solution) - 1):
+                item1, item2 = solution[i], solution[i + 1]
+                agreement_matrix[item1][item2] += 1
+
+        # 找出最强的项目对
+        pairs = []
+        max_agreement = np.max(agreement_matrix)
+        if max_agreement > 0:
+            threshold = max_agreement * pairs_threshold
+            for i in range(num_items):
+                for j in range(num_items):
+                    if agreement_matrix[i][j] >= threshold:
+                        pairs.append((i, j, agreement_matrix[i][j]))
+        
+        # 按照agreement值排序pairs
+        pairs.sort(key=lambda x: x[2], reverse=True)
+        
+        # 初始化解决方案
+        solution = []
+        used_items = set()
+        
+        # 从最强的pairs开始构建解决方案
+        for item1, item2, _ in pairs:
+            if len(used_items) >= num_items:
+                break
+                
+            if item1 not in used_items and item2 not in used_items:
+                solution.extend([item1, item2])
+                used_items.add(item1)
+                used_items.add(item2)
+            elif item1 not in used_items and solution[-1] == item2:
+                solution.append(item1)
+                used_items.add(item1)
+            elif item2 not in used_items and solution[-1] == item1:
+                solution.append(item2)
+                used_items.add(item2)
+
+        # 使用贪婪算法添加剩余项目
+        current_item = solution[-1] if solution else None
+        
+        while len(solution) < num_items:
+            if current_item is not None:
+                row = agreement_matrix[current_item]
+                # 将已使用的项设置为-1
+                row = np.where([i in used_items for i in range(num_items)], -1, row)
+                if np.max(row) > 0:
+                    current_item = np.argmax(row)
+                    solution.append(current_item)
+                    used_items.add(current_item)
+                else:
+                    # 如果没有更好的选择，选择任意未使用的项
+                    unused_items = list(set(range(num_items)) - used_items)
+                    if unused_items:
+                        current_item = unused_items[0]
+                        solution.append(current_item)
+                        used_items.add(current_item)
+            else:
+                # 如果current_item为None，选择任意未使用的项
+                unused_items = list(set(range(num_items)) - used_items)
+                if unused_items:
+                    current_item = unused_items[0]
+                    solution.append(current_item)
+                    used_items.add(current_item)
+
+        return solution
+
 class BinPackingGUI:
     def __init__(self, master):
         self.master = master
@@ -422,6 +536,7 @@ class BinPackingGUI:
             ("Max Iterations:", "max_iterations", "2000"),
             ("Early Stop Generations:", "early_stop_generations", "200"),
             ("Improvement Threshold:", "improvement_threshold", "0.01"),
+            ("Output Folder Name:", "output_folder", "experiment_results"),
         ]
 
         for i, (label_text, var_name, default_value) in enumerate(controls):
@@ -435,6 +550,13 @@ class BinPackingGUI:
         # Add save outputs checkbox
         self.save_outputs = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.control_frame, text="Save Images & GIF", variable=self.save_outputs).grid(
+            row=row, column=0, columnspan=2, sticky=tk.W)
+        row += 1
+
+        # WOC选择框
+        self.use_woc = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.control_frame, text="Use WOC Algorithm", 
+                       variable=self.use_woc).grid(
             row=row, column=0, columnspan=2, sticky=tk.W)
         row += 1
 
@@ -465,18 +587,80 @@ class BinPackingGUI:
         crossover_combo.grid(row=row, column=1, sticky=(tk.W, tk.E))
         row += 1
 
-        # Buttons
-        self.run_button = ttk.Button(self.control_frame, text="Run GA", command=self.run_ga)
-        self.run_button.grid(row=row, column=0)
+        # 修改按钮布局部分
+        button_frame = ttk.Frame(self.control_frame)
+        button_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        
+        self.run_button = ttk.Button(button_frame, text="Run GA", command=self.run_ga)
+        self.run_button.pack(side=tk.LEFT, padx=5)
 
-        self.stop_button = ttk.Button(self.control_frame, text="Stop", command=self.stop_ga)
-        self.stop_button.grid(row=row, column=1)
+        self.stop_button = ttk.Button(button_frame, text="Stop", command=self.stop_ga)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
         self.stop_button['state'] = 'disabled'
         row += 1
 
         # Results text
         self.result_text = tk.Text(self.control_frame, height=10, width=40)
         self.result_text.grid(row=row, column=0, columnspan=2)
+
+    def save_run_statistics(self, all_stats, params):
+        """保存所有运行的统计数据到单个CSV文件"""
+        output_folder = self.output_folder.get()
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        filename = os.path.join(output_folder, 'experiment_results.csv')
+
+        # 定义CSV文件的表头
+        headers = [
+            'run_number',
+            'running_time',
+            'num_bins',
+            'gap_space',
+            'fitness',
+            'space_utilization',
+            'bin_width',
+            'bin_height',
+            'mutation_rate',
+            'crossover_rate',
+            'population_size',
+            'max_iterations',
+            'early_stop_generations',
+            'improvement_threshold',
+            'selection_method',
+            'mutation_type',
+            'crossover_type'
+        ]
+
+        # 准备每次运行的数据
+        rows = []
+        for run_num, stats in enumerate(all_stats, 1):
+            row = [
+                run_num,
+                stats['execution_time'],
+                stats['num_bins'],
+                stats['empty_space'],
+                stats['fitness'],
+                stats['utilization'],
+                params['bin_width'],
+                params['bin_height'],
+                params['mutation_rate'],
+                params['crossover_rate'],
+                params['population_size'],
+                params['max_iterations'],
+                params['early_stop_generations'],
+                params['improvement_threshold'],
+                self.selection_method.get(),
+                self.mutation_type.get(),
+                self.crossover_type.get()
+            ]
+            rows.append(row)
+
+        # 写入CSV文件
+        with open(filename, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)  # 写入表头
+            writer.writerows(rows)  # 写入所有数据行
 
     def setup_plot_panel(self):
         self.fig = plt.figure(figsize=(8, 10))
@@ -498,7 +682,7 @@ class BinPackingGUI:
         self.ax1.grid(True)
 
         self.ax2.clear()
-        colors = plt.cm.get_cmap('hsv')(np.linspace(0, 1, 30))
+        colors = plt.cm.get_cmap('hsv')(np.linspace(0, 1, 300))
         bin_width = float(self.bin_width.get())
         bin_height = float(self.bin_height.get())
 
@@ -587,6 +771,13 @@ class BinPackingGUI:
         best_fitnesses = []
         execution_times = []
         empty_spaces = []
+        all_stats = []
+        all_populations = []  # 存储所有运行的最终种群
+
+        # 创建输出文件夹
+        output_folder = self.output_folder.get()
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
 
         for run in range(params['num_runs']):
             if not self.is_running:
@@ -609,26 +800,81 @@ class BinPackingGUI:
                 selection_method=self.selection_method.get(),
                 mutation_type=self.mutation_type.get(),
                 crossover_type=self.crossover_type.get(),
-                save_outputs=params['save_outputs']
+                save_outputs=params['save_outputs'],
+                run_number=run + 1,
+                output_folder=output_folder
             )
 
             solution, fitness, improvement_curve = model.run()
             if not self.is_running:
                 break
 
+            execution_time = time.time() - start_time
+
             total_bin_area = params['bin_width'] * params['bin_height'] * len(solution)
             used_area = sum(sum(item['width'] * item['height'] for item in bin_dict['items']) for bin_dict in solution)
             empty_space = total_bin_area - used_area
+            utilization = ((total_bin_area - empty_space) / total_bin_area) * 100
 
-            end_time = time.time()
+            # 收集本次运行的统计数据
+            stats = {
+                'execution_time': execution_time,
+                'num_bins': len(solution),
+                'empty_space': empty_space,
+                'fitness': fitness,
+                'utilization': utilization
+            }
+            all_stats.append(stats)
+
             best_solutions.append(solution)
             best_fitnesses.append(fitness)
-            execution_times.append(end_time - start_time)
+            execution_times.append(execution_time)
             empty_spaces.append(empty_space)
+
+            # 保存前运行的结果到文本文件
+            run_results_file = os.path.join(output_folder, f'run_{run + 1}', 'run_results.txt')
+            os.makedirs(os.path.dirname(run_results_file), exist_ok=True)
+            with open(run_results_file, 'w') as f:
+                f.write(f"""Run {run + 1} Results:
+Number of Bins: {len(solution)}
+Fitness: {fitness:.2f}
+Empty Space: {empty_space:.2f} square units
+Space Utilization: {utilization:.2f}%
+Execution Time: {execution_time:.2f} seconds
+""")
 
             self.status_var.set(f"Completed run {run + 1} of {params['num_runs']}")
 
+            # 保存最终种群
+            all_populations.append(model.fruits)
+
+        if self.is_running and self.use_woc.get() and len(all_populations) > 0:
+            # 使用WOC算法创建最终解决方案
+            woc_solution = model.create_woc_solution(all_populations, len(items))
+            woc_bins = model.pack_items(woc_solution)
+            woc_fitness = model.compute_fitness(woc_solution)
+            
+            if woc_fitness < min(best_fitnesses):
+                best_solutions[-1] = woc_bins
+                best_fitnesses[-1] = woc_fitness
+                
+                # 更新显示
+                self.update_plots(improvement_curve, woc_bins)
+                
+                # 保存WOC结果
+                woc_results_file = os.path.join(output_folder, 'woc_results.txt')
+                with open(woc_results_file, 'w') as f:
+                    f.write(f"""WOC Algorithm Results:
+Number of Bins: {len(woc_bins)}
+Fitness: {woc_fitness:.2f}
+Solution Sequence: {','.join(map(str, woc_solution))}
+""")
+
         if self.is_running:
+            # 保存所有运行的统计数据
+            self.save_run_statistics(all_stats, params)
+
+            # 计算和显示总体结果
             best_run_idx = np.argmin(best_fitnesses)
             best_solution = best_solutions[best_run_idx]
             best_fitness = best_fitnesses[best_run_idx]
@@ -637,34 +883,38 @@ class BinPackingGUI:
             total_area = params['bin_width'] * params['bin_height'] * len(best_solution)
             utilization = ((total_area - best_empty_space) / total_area) * 100
 
-            result_str = f"""
-            Performance Statistics:
-            Number of Bins Used: {len(best_solution)}
-            Best Fitness: {best_fitness:.2f}
-            Average Fitness: {np.mean(best_fitnesses):.2f}
-            Fitness Std Dev: {np.std(best_fitnesses):.2f}
-            Empty Space: {best_empty_space:.2f} square units
-            Space Utilization: {utilization:.2f}%
-            Average Time per Run: {np.mean(execution_times):.2f} seconds
-            Bin Dimensions: {params['bin_width']} x {params['bin_height']}
-            Selection Method: {self.selection_method.get()}
-            Mutation Type: {self.mutation_type.get()}
-            Crossover Type: {self.crossover_type.get()}
-            """
-            self.result_text.delete(1.0, tk.END)
-            self.result_text.insert(tk.END, result_str)
+            # 保存总体结果到文件
+            summary_file = os.path.join(output_folder, 'summary_results.txt')
+            with open(summary_file, 'w') as f:
+                summary_str = f"""Overall Results Summary:
+Best Run: Run {best_run_idx + 1}
+Number of Bins Used: {len(best_solution)}
+Best Fitness: {best_fitness:.2f}
+Average Fitness: {np.mean(best_fitnesses):.2f}
+Fitness Std Dev: {np.std(best_fitnesses):.2f}
+Empty Space: {best_empty_space:.2f} square units
+Space Utilization: {utilization:.2f}%
+Average Time per Run: {np.mean(execution_times):.2f} seconds
+Results saved in: {output_folder}
+"""
+                f.write(summary_str)
+                self.result_text.delete(1.0, tk.END)
+                self.result_text.insert(tk.END, summary_str)
 
         self.is_running = False
         self.run_button['state'] = 'normal'
         self.stop_button['state'] = 'disabled'
         self.status_var.set("Completed")
 
-
 def main():
     root = tk.Tk()
     gui = BinPackingGUI(root)
     root.mainloop()
 
-
 if __name__ == "__main__":
     main()
+
+
+
+
+
