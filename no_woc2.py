@@ -14,6 +14,7 @@ import csv
 import os
 from PIL import Image
 import shutil
+import json
 
 def save_population_agreement_matrix(population, num_items, filename='population_agreement_matrix.txt'):
     agreement_matrix = np.zeros((num_items, num_items))
@@ -47,7 +48,7 @@ def save_population_agreement_matrix(population, num_items, filename='population
 
 class GA:
     def __init__(self, num_items, num_total, max_iterations, items, mutation_rate=0.05, crossover_rate=0.85,
-                 population_size=25, early_stop_generations=200, improvement_threshold=0.01, bin_width=10,
+                 population_size=25, early_stop_generations=200, improvement_threshold=0.001, bin_width=10,
                  bin_height=10, update_callback=None, selection_method='roulette', mutation_type='reverse',
                  crossover_type='order', save_outputs=False, run_number=1, output_folder='experiment_results'):
         # 添加run_number和output_folder参数
@@ -422,14 +423,14 @@ class GA:
             for idx, (solution, fitness) in enumerate(population_fitness, 1):
                 writer.writerow([idx, fitness, ','.join(map(str, solution))])
 
-    def create_woc_solution(self, all_populations, num_items, top_ratio=0.2, pairs_threshold=0.3):
+    def create_woc_solution(self, all_populations, num_items, top_ratio=0.2, pairs_threshold=0.5):
         """基于多次运行的种群创建WOC解决方案"""
         # 收集所有种群中最优的解
         all_best_solutions = []
         for population in all_populations:
             solutions_with_fitness = [(sol, self.compute_fitness(sol)) for sol in population]
-            solutions_with_fitness.sort(key=lambda x: x[1])
-            num_to_select = int(len(population) * top_ratio)
+            solutions_with_fitness.sort(key=lambda x: x[1])  # 假设fitness越小越好
+            num_to_select = max(1, int(len(population) * top_ratio))  # 确保至少选择一个解
             all_best_solutions.extend([sol for sol, _ in solutions_with_fitness[:num_to_select]])
 
         # 创建agreement矩阵
@@ -448,56 +449,57 @@ class GA:
                 for j in range(num_items):
                     if agreement_matrix[i][j] >= threshold:
                         pairs.append((i, j, agreement_matrix[i][j]))
-        
+
         # 按照agreement值排序pairs
         pairs.sort(key=lambda x: x[2], reverse=True)
-        
+
         # 初始化解决方案
         solution = []
         used_items = set()
-        
+
         # 从最强的pairs开始构建解决方案
-        for item1, item2, _ in pairs:
-            if len(used_items) >= num_items:
+        for item1, item2, _ in pairs:  # 修复了语法错误
+            if len(used_items) >= num_items:  # 修复了变量名错误
                 break
-                
+
             if item1 not in used_items and item2 not in used_items:
                 solution.extend([item1, item2])
                 used_items.add(item1)
                 used_items.add(item2)
-            elif item1 not in used_items and solution[-1] == item2:
-                solution.append(item1)
-                used_items.add(item1)
-            elif item2 not in used_items and solution[-1] == item1:
+
+            elif item2 not in used_items and len(solution) > 0 and solution[-1] == item1:
                 solution.append(item2)
                 used_items.add(item2)
 
         # 使用贪婪算法添加剩余项目
-        current_item = solution[-1] if solution else None
-        
         while len(solution) < num_items:
+            current_item = solution[-1] if solution else None
+
             if current_item is not None:
-                row = agreement_matrix[current_item]
+                row = agreement_matrix[current_item].copy()  # 创建副本避免修改原始数据
                 # 将已使用的项设置为-1
-                row = np.where([i in used_items for i in range(num_items)], -1, row)
+                for i in range(num_items):
+                    if i in used_items:
+                        row[i] = -1
+
                 if np.max(row) > 0:
-                    current_item = np.argmax(row)
-                    solution.append(current_item)
-                    used_items.add(current_item)
+                    next_item = np.argmax(row)
+                    solution.append(next_item)
+                    used_items.add(next_item)
                 else:
                     # 如果没有更好的选择，选择任意未使用的项
                     unused_items = list(set(range(num_items)) - used_items)
                     if unused_items:
-                        current_item = unused_items[0]
-                        solution.append(current_item)
-                        used_items.add(current_item)
+                        next_item = unused_items[0]
+                        solution.append(next_item)
+                        used_items.add(next_item)
             else:
-                # 如果current_item为None，选择任意未使用的项
+                # 如果solution为空，选择任意未使用的项
                 unused_items = list(set(range(num_items)) - used_items)
                 if unused_items:
-                    current_item = unused_items[0]
-                    solution.append(current_item)
-                    used_items.add(current_item)
+                    next_item = unused_items[0]
+                    solution.append(next_item)
+                    used_items.add(next_item)
 
         return solution
 
@@ -535,8 +537,9 @@ class BinPackingGUI:
             ("Number of Runs:", "num_runs", "10"),
             ("Max Iterations:", "max_iterations", "2000"),
             ("Early Stop Generations:", "early_stop_generations", "200"),
-            ("Improvement Threshold:", "improvement_threshold", "0.01"),
+            ("Improvement Threshold:", "improvement_threshold", "0.001"),
             ("Output Folder Name:", "output_folder", "experiment_results"),
+            ("WOC Top Ratio:", "woc_top_ratio", "0.2"),
         ]
 
         for i, (label_text, var_name, default_value) in enumerate(controls):
@@ -546,6 +549,15 @@ class BinPackingGUI:
                 row=i, column=1, sticky=(tk.W, tk.E))
 
         row = len(controls)
+
+        # 添加数据集选择框
+        ttk.Label(self.control_frame, text="Dataset Path:").grid(row=row, column=0, sticky=tk.W)
+        self.dataset_path = tk.StringVar(value="50.json")
+        dataset_frame = ttk.Frame(self.control_frame)
+        dataset_frame.grid(row=row, column=1, sticky=(tk.W, tk.E))
+        ttk.Entry(dataset_frame, textvariable=self.dataset_path).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(dataset_frame, text="Browse", command=self.browse_dataset).pack(side=tk.RIGHT)
+        row += 1
 
         # Add save outputs checkbox
         self.save_outputs = tk.BooleanVar(value=False)
@@ -564,7 +576,7 @@ class BinPackingGUI:
         ttk.Label(self.control_frame, text="Selection Method:").grid(row=row, column=0, sticky=tk.W)
         self.selection_method = tk.StringVar(value="roulette")
         selection_combo = ttk.Combobox(self.control_frame, textvariable=self.selection_method)
-        selection_combo['values'] = ('roulette', 'tournament')
+        selection_combo['values'] = ('tournament', 'roulette')
         selection_combo['state'] = 'readonly'
         selection_combo.grid(row=row, column=1, sticky=(tk.W, tk.E))
         row += 1
@@ -766,7 +778,15 @@ class BinPackingGUI:
         if not self.is_running:
             return
 
-        items = get_test_data()
+        try:
+            # 使用选择的数据集文件
+            items = load_json_data(self.dataset_path.get())
+            self.status_var.set(f"successfully loaded {len(items)} items")
+        except Exception as e:
+            self.status_var.set(f"error: {str(e)}")
+            self.stop_ga()
+            return
+        
         best_solutions = []
         best_fitnesses = []
         execution_times = []
@@ -849,22 +869,27 @@ Execution Time: {execution_time:.2f} seconds
             all_populations.append(model.fruits)
 
         if self.is_running and self.use_woc.get() and len(all_populations) > 0:
-            # 使用WOC算法创建最终解决方案
-            woc_solution = model.create_woc_solution(all_populations, len(items))
+            # 使用WOC算法创建最终解决方案，传入top_ratio参数
+            woc_solution = model.create_woc_solution(
+                all_populations, 
+                len(items), 
+                top_ratio=float(self.woc_top_ratio.get())  # 使用GUI中设置的top_ratio值
+            )
+            
             woc_bins = model.pack_items(woc_solution)
             woc_fitness = model.compute_fitness(woc_solution)
             
-            if woc_fitness < min(best_fitnesses):
-                best_solutions[-1] = woc_bins
-                best_fitnesses[-1] = woc_fitness
-                
-                # 更新显示
-                self.update_plots(improvement_curve, woc_bins)
-                
-                # 保存WOC结果
-                woc_results_file = os.path.join(output_folder, 'woc_results.txt')
-                with open(woc_results_file, 'w') as f:
-                    f.write(f"""WOC Algorithm Results:
+
+            best_solutions.append(woc_bins)
+            best_fitnesses.append(woc_fitness)
+
+            # 更新显示
+            self.update_plots(improvement_curve, woc_bins)
+
+            # 保存WOC结果
+            woc_results_file = os.path.join(output_folder, 'woc_results.txt')
+            with open(woc_results_file, 'w') as f:
+                f.write(f"""WOC Algorithm Results:
 Number of Bins: {len(woc_bins)}
 Fitness: {woc_fitness:.2f}
 Solution Sequence: {','.join(map(str, woc_solution))}
@@ -906,6 +931,31 @@ Results saved in: {output_folder}
         self.stop_button['state'] = 'disabled'
         self.status_var.set("Completed")
 
+    def browse_dataset(self):
+        """打开文件选择对话框选择数据集"""
+        filename = tk.filedialog.askopenfilename(
+            title="Select Dataset",
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*"))
+        )
+        if filename:
+            self.dataset_path.set(filename)
+
+def load_json_data(file_path):
+    """从JSON文件加载数据并转换为所需格式"""
+    with open(file_path, 'r') as f:
+        json_data = json.load(f)
+    
+    # 转换为遗传算法所需的格式
+    items = []
+    for item in json_data:
+        items.append({
+            'id': item['id'],
+            'width': item['width'],
+            'height': item['height'],
+            'area': item['width'] * item['height']  # 添加面积计算
+        })
+    return items
+
 def main():
     root = tk.Tk()
     gui = BinPackingGUI(root)
@@ -913,8 +963,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-

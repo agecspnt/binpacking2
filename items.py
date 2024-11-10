@@ -1,4 +1,5 @@
 import random as rd
+import json  # 添加json导入
 
 
 def get_test_data(N=200, seed=42):
@@ -20,7 +21,14 @@ def get_test_data(N=200, seed=42):
     return items
 
 
+def save_to_json(data, filename):
+    """保存数据到JSON文件"""
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+
 # Example usage
 if __name__ == "__main__":
     data = get_test_data()
+    save_to_json(data, 'generated_data.json')
     print(data)
