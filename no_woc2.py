@@ -423,7 +423,7 @@ class GA:
             for idx, (solution, fitness) in enumerate(population_fitness, 1):
                 writer.writerow([idx, fitness, ','.join(map(str, solution))])
 
-    def create_woc_solution(self, all_populations, num_items, top_ratio=0.2, pairs_threshold=0.5):
+    def create_woc_solution_original(self, all_populations, num_items, top_ratio=0.2, pairs_threshold=0.5):
         """基于多次运行的种群创建WOC解决方案"""
         # 收集所有种群中最优的解
         all_best_solutions = []
@@ -503,6 +503,75 @@ class GA:
 
         return solution
 
+    def create_woc_solution(self, all_populations, num_items, top_ratio=0.2):
+        """Improved WOC solution creation"""
+        # Collect best solutions
+        all_best_solutions = []
+        for population in all_populations:
+            solutions_with_fitness = [(sol, self.compute_fitness(sol)) for sol in population]
+            solutions_with_fitness.sort(key=lambda x: x[1])
+            num_to_select = max(1, int(len(population) * top_ratio))
+            all_best_solutions.extend([sol for sol, _ in solutions_with_fitness[:num_to_select]])
+
+        # Create enhanced agreement matrix that considers wider context
+        agreement_matrix = np.zeros((num_items, num_items))
+        for solution in all_best_solutions:
+            # Consider items within a window, not just adjacent pairs
+            window_size = 3
+            for i in range(len(solution)):
+                for j in range(1, window_size + 1):
+                    if i + j < len(solution):
+                        item1, item2 = solution[i], solution[i + j]
+                        # Weight decreases with distance
+                        agreement_matrix[item1][item2] += 1.0 / j
+                        agreement_matrix[item2][item1] += 1.0 / j
+
+        # Generate multiple candidates using probabilistic reconstruction
+        num_candidates = 10
+        candidates = []
+
+        for _ in range(num_candidates):
+            solution = []
+            used_items = set()
+            current_item = None
+
+            while len(solution) < num_items:
+                if not current_item:
+                    # Start with random unused item
+                    available = list(set(range(num_items)) - used_items)
+                    current_item = random.choice(available)
+                else:
+                    # Probabilistic selection of next item
+                    weights = agreement_matrix[current_item].copy()
+                    # Zero out used items
+                    for used in used_items:
+                        weights[used] = 0
+
+                    if np.sum(weights) > 0:
+                        # Probabilistic selection weighted by agreement scores
+                        probs = weights / np.sum(weights)
+                        current_item = np.random.choice(range(num_items), p=probs)
+                    else:
+                        # If no weights, choose randomly from remaining items
+                        available = list(set(range(num_items)) - used_items)
+                        current_item = random.choice(available)
+
+                solution.append(current_item)
+                used_items.add(current_item)
+
+            candidates.append(solution)
+
+        # Evaluate all candidates and return the best one
+        best_fitness = float('inf')
+        best_candidate = None
+
+        for candidate in candidates:
+            fitness = self.compute_fitness(candidate)
+            if fitness < best_fitness:
+                best_fitness = fitness
+                best_candidate = candidate
+
+        return best_candidate
 class BinPackingGUI:
     def __init__(self, master):
         self.master = master
@@ -779,22 +848,20 @@ class BinPackingGUI:
             return
 
         try:
-            # 使用选择的数据集文件
             items = load_json_data(self.dataset_path.get())
             self.status_var.set(f"successfully loaded {len(items)} items")
         except Exception as e:
             self.status_var.set(f"error: {str(e)}")
             self.stop_ga()
             return
-        
+
         best_solutions = []
         best_fitnesses = []
         execution_times = []
         empty_spaces = []
         all_stats = []
-        all_populations = []  # 存储所有运行的最终种群
+        all_populations = []
 
-        # 创建输出文件夹
         output_folder = self.output_folder.get()
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
@@ -836,7 +903,6 @@ class BinPackingGUI:
             empty_space = total_bin_area - used_area
             utilization = ((total_bin_area - empty_space) / total_bin_area) * 100
 
-            # 收集本次运行的统计数据
             stats = {
                 'execution_time': execution_time,
                 'num_bins': len(solution),
@@ -851,55 +917,111 @@ class BinPackingGUI:
             execution_times.append(execution_time)
             empty_spaces.append(empty_space)
 
-            # 保存前运行的结果到文本文件
             run_results_file = os.path.join(output_folder, f'run_{run + 1}', 'run_results.txt')
             os.makedirs(os.path.dirname(run_results_file), exist_ok=True)
             with open(run_results_file, 'w') as f:
                 f.write(f"""Run {run + 1} Results:
-Number of Bins: {len(solution)}
-Fitness: {fitness:.2f}
-Empty Space: {empty_space:.2f} square units
-Space Utilization: {utilization:.2f}%
-Execution Time: {execution_time:.2f} seconds
-""")
+    Number of Bins: {len(solution)}
+    Fitness: {fitness:.2f}
+    Empty Space: {empty_space:.2f} square units
+    Space Utilization: {utilization:.2f}%
+    Execution Time: {execution_time:.2f} seconds
+    """)
 
             self.status_var.set(f"Completed run {run + 1} of {params['num_runs']}")
-
-            # 保存最终种群
             all_populations.append(model.fruits)
 
         if self.is_running and self.use_woc.get() and len(all_populations) > 0:
-            # 使用WOC算法创建最终解决方案，传入top_ratio参数
+            # Create WOC solution
             woc_solution = model.create_woc_solution(
-                all_populations, 
-                len(items), 
-                top_ratio=float(self.woc_top_ratio.get())  # 使用GUI中设置的top_ratio值
+                all_populations,
+                len(items),
+                top_ratio=float(self.woc_top_ratio.get())
             )
-            
+
             woc_bins = model.pack_items(woc_solution)
             woc_fitness = model.compute_fitness(woc_solution)
-            
+
+            # Save WOC visualization
+            woc_output_dir = os.path.join(output_folder, 'woc_results')
+            os.makedirs(woc_output_dir, exist_ok=True)
+
+            # Create figure for WOC solution
+            fig = plt.figure(figsize=(12, 8))
+            ax = fig.add_subplot(111)
+
+            # Plot WOC solution
+            colors = plt.cm.get_cmap('hsv')(np.linspace(0, 1, 300))
+            bin_width = float(self.bin_width.get())
+            bin_height = float(self.bin_height.get())
+
+            bins_per_row = 4
+            spacing = 2
+            grid_width = bins_per_row * (bin_width + spacing)
+            num_rows = math.ceil(len(woc_bins) / bins_per_row)
+
+            for i, bin_dict in enumerate(woc_bins):
+                row = i // bins_per_row
+                col = i % bins_per_row
+
+                x_pos = col * (bin_width + spacing)
+                y_pos = (num_rows - 1 - row) * (bin_height + spacing)
+
+                # Draw bin
+                bin_rect = plt.Rectangle((x_pos, y_pos), bin_width, bin_height,
+                                         facecolor='none', edgecolor='black', linestyle='--')
+                ax.add_patch(bin_rect)
+
+                # Draw items in bin
+                for item in bin_dict['items']:
+                    item_x = x_pos + item['x']
+                    item_y = y_pos + item['y']
+                    item_w = item['width']
+                    item_h = item['height']
+                    color = colors[item['id'] - 1]
+
+                    rect = plt.Rectangle((item_x, item_y), item_w, item_h,
+                                         facecolor=color, edgecolor='black', alpha=0.7)
+                    ax.add_patch(rect)
+                    ax.text(item_x + item_w / 2, item_y + item_h / 2, f'{item["id"]}',
+                            ha='center', va='center')
+
+            ax.set_xlim(-spacing, grid_width + spacing)
+            ax.set_ylim(-spacing, num_rows * (bin_height + spacing) + spacing)
+            ax.set_title('WOC Solution Visualization')
+            ax.set_aspect('equal')
+            ax.grid(True)
+
+            # Save WOC visualization
+            plt.savefig(os.path.join(woc_output_dir, 'woc_solution.png'), dpi=300, bbox_inches='tight')
+            plt.close(fig)
+
+            # Update current display
+            self.update_plots(improvement_curve, woc_bins)
 
             best_solutions.append(woc_bins)
             best_fitnesses.append(woc_fitness)
 
-            # 更新显示
-            self.update_plots(improvement_curve, woc_bins)
+            # Calculate WOC statistics
+            total_bin_area = params['bin_width'] * params['bin_height'] * len(woc_bins)
+            used_area = sum(sum(item['width'] * item['height'] for item in bin_dict['items']) for bin_dict in woc_bins)
+            woc_empty_space = total_bin_area - used_area
+            woc_utilization = ((total_bin_area - woc_empty_space) / total_bin_area) * 100
 
-            # 保存WOC结果
-            woc_results_file = os.path.join(output_folder, 'woc_results.txt')
+            # Save WOC results
+            woc_results_file = os.path.join(woc_output_dir, 'woc_results.txt')
             with open(woc_results_file, 'w') as f:
                 f.write(f"""WOC Algorithm Results:
-Number of Bins: {len(woc_bins)}
-Fitness: {woc_fitness:.2f}
-Solution Sequence: {','.join(map(str, woc_solution))}
-""")
+    Number of Bins: {len(woc_bins)}
+    Fitness: {woc_fitness:.2f}
+    Empty Space: {woc_empty_space:.2f} square units
+    Space Utilization: {woc_utilization:.2f}%
+    Solution Sequence: {','.join(map(str, woc_solution))}
+    """)
 
         if self.is_running:
-            # 保存所有运行的统计数据
             self.save_run_statistics(all_stats, params)
 
-            # 计算和显示总体结果
             best_run_idx = np.argmin(best_fitnesses)
             best_solution = best_solutions[best_run_idx]
             best_fitness = best_fitnesses[best_run_idx]
@@ -908,20 +1030,19 @@ Solution Sequence: {','.join(map(str, woc_solution))}
             total_area = params['bin_width'] * params['bin_height'] * len(best_solution)
             utilization = ((total_area - best_empty_space) / total_area) * 100
 
-            # 保存总体结果到文件
             summary_file = os.path.join(output_folder, 'summary_results.txt')
             with open(summary_file, 'w') as f:
                 summary_str = f"""Overall Results Summary:
-Best Run: Run {best_run_idx + 1}
-Number of Bins Used: {len(best_solution)}
-Best Fitness: {best_fitness:.2f}
-Average Fitness: {np.mean(best_fitnesses):.2f}
-Fitness Std Dev: {np.std(best_fitnesses):.2f}
-Empty Space: {best_empty_space:.2f} square units
-Space Utilization: {utilization:.2f}%
-Average Time per Run: {np.mean(execution_times):.2f} seconds
-Results saved in: {output_folder}
-"""
+    Best Run: Run {best_run_idx + 1}
+    Number of Bins Used: {len(best_solution)}
+    Best Fitness: {best_fitness:.2f}
+    Average Fitness: {np.mean(best_fitnesses):.2f}
+    Fitness Std Dev: {np.std(best_fitnesses):.2f}
+    Empty Space: {best_empty_space:.2f} square units
+    Space Utilization: {utilization:.2f}%
+    Average Time per Run: {np.mean(execution_times):.2f} seconds
+    Results saved in: {output_folder}
+    """
                 f.write(summary_str)
                 self.result_text.delete(1.0, tk.END)
                 self.result_text.insert(tk.END, summary_str)
